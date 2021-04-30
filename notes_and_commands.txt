@@ -1,0 +1,122 @@
+https://github.com/usgpo/uslm
+https://github.com/unitedstates/congress/wiki/bill-text
+(congress) Download Bills
+./run govinfo --collections=BILLS --congress=115 --store=xml,text --bulkdata=False
+Unzip xml
+find . -name '*.zip' -execdir sh -c 'unzip -j "$0" */xml/*.xml -d "${0%/package.zip}"' {} +
+(congress) xml_parser.ipynb
+Parse to tab separated csv
+Index, text, date
+
+http://www.ccs.neu.edu/home/dasmith/wilkerson-smith-stramp-AJPS.pdf
+
+(congress) run_passim.ipynb
+Parse to json
+{"id": "", "date": "", "series": "", "text": }
+SPARK_SUBMIT_ARGS='--master local[4]' bin/passim /home/harry/PycharmProjects/congress/passim/input/data.json /home/harry/PycharmProjects/congress/passim/output --fields 'date(date) as day' --filterpairs '(day < day2 AND gid <> gid2) OR (day == day2 AND gid < gid2)' --pairwise --docwise
+
+(congress) run_passim.ipynb
+Parse output json to relationships.csv to add alignments to graph
+
+Fix Duplicate Nodes
+MATCH (n:text)
+WITH n.id AS name, COLLECT(n) AS nodelist, COUNT(*) AS count
+WHERE count > 1
+CALL apoc.refactor.mergeNodes(nodelist)
+YIELD node
+RETURN node
+
+CREATE CONSTRAINT ON (t:text)
+ASSERT t.id IS UNIQUE;
+
+CREATE INDEX FOR (a:text) ON (a.id)
+ 
+LOAD CSV FROM "file:///relationships.csv" AS row
+MATCH (t1:text {id:row[0]})
+MATCH (t2:text {id:row[1]})
+MERGE (t1)-[:ALIGNED {weight:toFloat(row[2])}]->(t2)
+ 
+Get Alignments Per Node
+MATCH (n:text)-[r:ALIGNED]-(o:text)
+WITH n, collect(o.id) as Neighbors, COUNT(o) AS score
+WHERE score > 0 
+RETURN n.id, Neighbors
+ORDER BY score DESC
+ 
+CALL apoc.stats.degrees("ALIGNED>");
+ 
+Delete nodes with outgoing degree in 999th percentile
+MATCH (k:text)
+WITH k, size((k)-[:ALIGNED]->()) as degree
+WHERE degree > 17
+DETACH DELETE k
+ 
+Merge text nodes for each document
+MATCH (n:text)
+WITH n.file AS f, collect(n) as node2Merge
+CALL apoc.refactor.mergeNodes(node2Merge)
+YIELD node AS newNode
+RETURN newNode
+ 
+Create in-memory graph
+CALL gds.graph.create.cypher(
+'text_graph',
+'MATCH (n:text) RETURN id(n) AS id',
+'MATCH (a:text)-[r:ALIGNED]->(b:text) RETURN id(a) AS source, id(b) AS target, toFloat(r.weight) AS weight'
+)
+YIELD graphName, nodeCount, relationshipCount, createMillis;
+ 
+Personalized PageRank
+MATCH (siteA:text {file:'data__115__bills__s__s1'})
+CALL gds.pageRank.stream('text_graph', {
+maxIterations: 20,
+dampingFactor: 0.85,
+relationshipWeightProperty: 'weight',
+sourceNodes: [siteA]
+})
+YIELD nodeId, score
+WITH gds.util.asNode(nodeId) AS tNode, score, siteA
+RETURN tNode.file AS name, score, size((tNode)-->(siteA)) AS count
+ORDER BY score DESC, name ASC
+ 
+Count Relationships
+MATCH (n:text {file:'data__115__bills__s__s1'})
+MATCH (m:text)
+RETURN m.file AS name, size((m)-->(n)) AS count
+ORDER BY count DESC, name ASC
+ 
+https://learning.oreilly.com/library/view/Graph+Algorithms/9781492047674/ch06.html#louvain
+https://neo4j.com/docs/graph-data-science/current/algorithms/louvain/#algorithms-louvain
+https://arxiv.org/pdf/1405.4053.pdf paragraph vectors
+https://arxiv.org/pdf/1301.3781.pdf word vectors
+https://papers.nips.cc/paper/2013/file/9aa42b31882ec039965f3c4923ce901b-Paper.pdf
+ 
+ 
+ 
+ 
+Create in-memory graph
+CALL gds.graph.create.cypher(
+'all_graph',
+'MATCH (n) RETURN id(n) AS id',
+'MATCH (a)-[r]-(b) RETURN id(a) AS source, id(b) AS target'
+)
+YIELD graphName, nodeCount, relationshipCount, createMillis;
+CALL gds.louvain.write.estimate('all_graph',{
+    includeIntermediateCommunities: true,
+    writeProperty: "communities"
+});
+CALL gds.louvain.write.estimate('all_graph',{
+includeIntermediateCommunities: false,
+writeProperty: "finalCommunity"
+});
+Merge text nodes for each document
+MATCH (n:text)
+WITH n.finalCommunity AS community,n.file AS f, collect(n) AS node2Merge
+CALL apoc.refactor.mergeNodes(node2Merge)
+YIELD node AS newNode
+RETURN newNode
+ 
+ 
+MATCH (l:text)
+RETURN l.finalCommunity AS community, collect(l.id) AS libraries
+ORDER BY size(libraries) DESC;
